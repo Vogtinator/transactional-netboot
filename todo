@@ -1,6 +1,6 @@
-- secure boot does not like embedded configs
 - grub.cfg not world-readable, not liked by in.tftpd
 - GRUB2 test -f does not work over tftp
 - GRUB2 uses btrfs_subvol and not relative paths
 
-- Use snapper create-config in setup-slave-device.sh
+- Make export ro again
+- Add tftpboot fstab entry

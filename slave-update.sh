@@ -2,44 +2,64 @@
 
 root="/srv/slave"
 
-default_subvol="$(btrfs subvolume get-default "${root}" | cut -d' ' -f9-)"
+snapshot_mount="$(mktemp -d)"
 
-snapshot="$(mktemp -d)"
+# Create a new RW snapshot
+old_subvol="$(btrfs subvolume get-default "${root}" | cut -d' ' -f9-)"
 
-mount --bind --make-private "${root}/${default_subvol}" "${snapshot}"
-
-# Make sure it's read-only
-#btrfs property set ${snapshot} ro true
+mount --bind --make-private "${root}/${old_subvol}" "${snapshot_mount}"
 
 for i in dev sys proc; do
-    mount --bind "/${i}" "${snapshot}/${i}"
+    mount --bind "/${i}" "${snapshot_mount}/${i}"
 done
+mount -t tmpfs tmpfs "${snapshot_mount}/run"
+mount -t tmpfs tmpfs "${snapshot_mount}/tmp"
+mount --bind "${root}/.snapshots" "${snapshot_mount}/.snapshots"
 
-mount -t tmpfs tmpfs "${snapshot}/run"
-mount -t tmpfs tmpfs "${snapshot}/tmp"
+new_snapshot_id="$(chroot "${snapshot_mount}" snapper --no-dbus create -t single -p)"
+new_subvol=".snapshots/${new_snapshot_id}/snapshot"
 
-#mkdir -p /tmp/etcupper
-#cp /etc/resolv.conf /tmp/etcupper
-#mount -t overlay overlay -o "lowerdir=/tmp/etcupper:${snapshot}/etc" "${snapshot}/etc"
+umount ${snapshot_mount}/{tmp,run,proc,sys,dev,.snapshots,}
 
-#for i in var opt home root; do 
-#    mount -o bind "${root}/${i}" "${snapshot}/${i}"
-#done
+# Chroot to it
+mount --bind --make-private "${root}/${new_subvol}" "${snapshot_mount}"
+# Make sure it's read-write
+btrfs property set ${snapshot_mount} ro false
 
-mount --bind "${root}/.snapshots" "${snapshot}/.snapshots"
+for i in dev sys proc; do
+    mount --bind "/${i}" "${snapshot_mount}/${i}"
+done
+mount -t tmpfs tmpfs "${snapshot_mount}/run"
+mount -t tmpfs tmpfs "${snapshot_mount}/tmp"
+mount --bind "${root}/.snapshots" "${snapshot_mount}/.snapshots"
 
-(cd "${snapshot}"; chroot "${snapshot}" $@)
+PS1="(slave) $PS1" chroot "${snapshot_mount}" $@
 ret=$?
 
-umount ${snapshot}/{.snapshots,etc,tmp,run,proc,sys,dev,}
-#umount ${snapshot}/{.snapshots,root,home,opt,var,etc,tmp,run,proc,sys,dev,}
+if [ $ret == 0 ]; then
+	# Generate new PXE grub image
+	chroot "${snapshot_mount}" grub2-mkimage -O i386-pc-pxe -o /boot/grub.pxe -p "(tftp)" pxe tftp
+	ret=$?
+fi
 
-rm -rf /tmp/etcupper
+umount ${snapshot_mount}/{tmp,run,proc,sys,dev,.snapshots,}
+rmdir ${snapshot_mount}
 
-rmdir ${snapshot}
+if [ $ret != 0 ]; then
+	echo "Operation failed - deleting snapshot"
+	btrfs subvolume delete "${root}/.snapshots/${new_snapshot_id}/snapshot"
+	rm -rf "${root}/.snapshots/${new_snapshot_id}"
+else
+	# Make sure it's read-only
+	btrfs property set ${root}/${new_subvol} ro true
 
-default_subvol="$(btrfs subvolume get-default "${root}" | cut -d' ' -f9-)"
+	new_subvol_id=$(btrfs subvol list ${root} | awk "/\\/${new_snapshot_id}\\/snapshot/ { print \$2 }")
+	btrfs subvolume set-default ${new_subvol_id} ${root}
 
-echo "set snapshot_root=/$default_subvol" > /srv/tftpboot/snapshot.cfg
+	echo "set snapshot_root=/$new_subvol" > ${root}/snapshot.cfg
+        ln -sfT ${new_subvol} ${root}/current-snapshot
+
+	echo "Active snapshot is now ${new_subvol}"
+fi
 
 exit $ret
