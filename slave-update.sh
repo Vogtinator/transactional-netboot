@@ -2,34 +2,22 @@
 
 root="/srv/slave"
 
-snapshot_mount="$(mktemp -d)"
+. "$(dirname "$0")/utils.sh"
 
 # Create a new RW snapshot
 old_subvol="$(readlink "${root}/current-snapshot")"
-
-mount --bind --make-private "${root}/${old_subvol}" "${snapshot_mount}"
-
-for i in dev sys proc; do
-    mount --bind "/${i}" "${snapshot_mount}/${i}"
-done
-mount -t tmpfs tmpfs "${snapshot_mount}/run"
-mount -t tmpfs tmpfs "${snapshot_mount}/tmp"
-mount --bind "${root}/.snapshots" "${snapshot_mount}/.snapshots"
+snapshot_mount="$(prepare_chroot "${root}/${old_subvol}")" || exit 1
 
 new_snapshot_id="$(chroot "${snapshot_mount}" snapper --no-dbus create -t single -p)"
 new_subvol=".snapshots/${new_snapshot_id}/snapshot"
 
-umount ${snapshot_mount}/{tmp,run,proc,sys,dev,.snapshots,}
+cleanup_chroot "${snapshot_mount}"
+
+# Make it read-writable
+btrfs property set "${root}/${new_subvol}" ro false
 
 # Chroot to it
-mount --bind --make-private "${root}/${new_subvol}" "${snapshot_mount}"
-
-for i in dev sys proc; do
-    mount --bind "/${i}" "${snapshot_mount}/${i}"
-done
-mount -t tmpfs tmpfs "${snapshot_mount}/run"
-mount -t tmpfs tmpfs "${snapshot_mount}/tmp"
-mount --bind "${root}/.snapshots" "${snapshot_mount}/.snapshots"
+snapshot_mount="$(prepare_chroot "${root}/${new_subvol}")"
 
 PS1='slave:\w # ' chroot "${snapshot_mount}" $@
 ret=$?
@@ -40,8 +28,7 @@ if [ $ret == 0 ]; then
 	ret=$?
 fi
 
-umount ${snapshot_mount}/{tmp,run,proc,sys,dev,.snapshots,}
-rmdir ${snapshot_mount}
+cleanup_chroot "${snapshot_mount}"
 
 if [ $ret != 0 ]; then
 	echo "Operation failed - deleting snapshot"
@@ -49,10 +36,10 @@ if [ $ret != 0 ]; then
 	rm -rf "${root}/.snapshots/${new_snapshot_id}"
 else
 	# Make sure it's read-only
-	btrfs property set ${root}/${new_subvol} ro true
+	btrfs property set "${root}/${new_subvol}" ro true
 
-	echo "set snapshot_root=/$new_subvol" > ${root}/snapshot.cfg
-        ln -sfT ${new_subvol} ${root}/current-snapshot
+	echo "set snapshot_root=/$new_subvol" > "${root}/snapshot.cfg"
+        ln -sfT "${new_subvol}" "${root}/current-snapshot"
 
 	echo "Active snapshot is now ${new_subvol}"
 fi
