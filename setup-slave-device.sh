@@ -21,16 +21,10 @@ cat > ${mountpoint}/.snapshots/1/info.xml <<EOF
 <snapshot>
   <type>single</type>
   <num>1</num>
-  <date>now</date>
+  <date>$(date +"%F %T")</date>
   <description>Initial installation</description>
 </snapshot>
 EOF
 
-btrfs subvol set-default $(btrfs subvol list ${mountpoint} | awk '/snapshot$/ { print $2 }') ${mountpoint}
-
-echo "${mountpoint}/.snapshots/1/snapshot *(rw,no_root_squash,no_subtree_check,async,fsid=0)" >> /etc/exports
-
-exportfs -ra
-
-echo "Now install into nfs"
+echo "Now install into nfs, <ip>:/<prefix>/.snapshots/1/snapshot"
 
