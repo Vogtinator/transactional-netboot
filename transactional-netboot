@@ -28,7 +28,8 @@ function prepare_chroot {
 		&& mount -t proc proc "${mountpoint}/proc" \
 		&& mount -t tmpfs tmpfs  "${mountpoint}/run" \
 		&& mount -t tmpfs tmpfs  "${mountpoint}/tmp" \
-		&& mount --bind "$1/../../../.snapshots" "${mountpoint}/.snapshots"; then
+		&& mount --bind "$1/../../../.snapshots" "${mountpoint}/.snapshots" \
+		&& mount --bind -o ro "/etc/resolv.conf" "${mountpoint}/etc/resolv.conf"; then
 		echo "${mountpoint}"
 		return 0
 	fi
@@ -38,7 +39,7 @@ function prepare_chroot {
 
 # Cleanup a mountpoint prepared by prepare_chroot
 function cleanup_chroot {
-	umount $1/{tmp,run,proc,sys,dev,.snapshots,} 2>/dev/null || :
+	umount $1/{etc/resolv.conf,.snapshots,tmp,run,proc,sys,dev,} 2>/dev/null || :
 	rmdir $1 || :
 }
 
@@ -69,17 +70,17 @@ if [ -z "${MINIONS_PATH+x}" ]; then
 	exit 1
 fi
 
-MINIONS_EXPORT_PREFIX="${MINIONS_NFS_PREFIX+/}"
+[ -z "${MINIONS_EXPORT_PREFIX+x}" ] && MINIONS_EXPORT_PREFIX="/"
 
-if [ "$#" -eq 0 -o "$1" = "--help" ]; then
+if [ "$#" -eq 0 -o "${1-}" = "--help" ]; then
 	print_help
 	exit 0
 fi
 
 MINION_NAME="$1"
 shift
-COMMAND="${1+}"
-shift
+COMMAND="${1-}"
+shift || :
 
 case "$COMMAND" in
 	--init)
@@ -90,14 +91,14 @@ case "$COMMAND" in
 
 		btrfs subvolume create "${MINIONS_PATH}/${MINION_NAME}"
 		btrfs subvolume create "${MINIONS_PATH}/${MINION_NAME}/.snapshots"
-		mkdir "${MINIONS_PATH}/${MINION_NAME}/@/.snapshots/1"
+		mkdir "${MINIONS_PATH}/${MINION_NAME}/.snapshots/1"
 		btrfs subvolume create "${MINIONS_PATH}/${MINION_NAME}/.snapshots/1/snapshot"
-		cat > "${MINIONS_PATH}/${MINION_NAME}/.snapshots/1/snapshot/info.xml" <<EOF
+		cat > "${MINIONS_PATH}/${MINION_NAME}/.snapshots/1/info.xml" <<EOF
 <?xml version="1.0"?>
 <snapshot>
   <type>single</type>
   <num>1</num>
-  <date>$(date +"%F %T")</date>
+  <date>$(TZ=UTC date +"%F %T")</date>
   <description>Initial installation</description>
 </snapshot>
 EOF
@@ -116,14 +117,24 @@ EOF
 			exit 1
 		fi
 
-		if ! umount "${MINIONS_PATH}/.install/${MINION_NAME}"; then
-			echo "Still busy, try again later."
+		subvol="${MINIONS_PATH}/${MINION_NAME}/.snapshots/1/snapshot"
+
+		if [ ! -e "${subvol}/sbin/init" ]; then
+			echo "Minion not installed?"
 			exit 1
 		fi
 
-		rmdir "${MINIONS_PATH}/.install/${MINION_NAME}"
-		
-		subvol="${MINIONS_PATH}/${MINION_NAME}/.snapshots/1/snapshot"
+		if mountpoint -q "${MINIONS_PATH}/.install/${MINION_NAME}"; then
+			if ! umount "${MINIONS_PATH}/.install/${MINION_NAME}"; then
+				echo "Still busy, try again later."
+				exit 1
+			fi
+		fi
+
+		[ -d "${MINIONS_PATH}/.install/${MINION_NAME}" ] && rmdir "${MINIONS_PATH}/.install/${MINION_NAME}"
+
+		# Prepare for snapshots
+		mkdir -p "${subvol}/.snapshots"
 
 		snapshot_mount="$(prepare_chroot "${subvol}")" || exit 1
 
@@ -132,8 +143,6 @@ EOF
 		chroot "${snapshot_mount}" snapper --no-dbus set-config NUMBER_CLEANUP=no TIMELINE_CREATE=no BACKGROUND_COMPARISON=no
 
 		cleanup_chroot "${snapshot_mount}"
-
-		btrfs property set "${subvol}" ro true
 
 		cat >"${MINIONS_PATH}/${MINION_NAME}/grub.cfg" <<"EOF"
 # Get the path of the loaded image
@@ -147,12 +156,15 @@ set prefix=(tftp)${root_path}${snapshot_root}/boot/grub2
 source ${prefix}/grub.cfg
 EOF
 
+		mkdir -p "/etc/dhcpd.d/"
 		cat >"/etc/dhcpd.d/netboot-${MINION_NAME}.conf" <<EOF
-filename "${MINION_EXPORT_PREFIX}/grub.pxe";
+filename "${MINIONS_EXPORT_PREFIX}${MINION_NAME}/grub.pxe";
 if substring (option vendor-class-identifier, 15, 5) = "00007" {
-  filename "${MINIONS_EXPORT_PREFIX}/shim.efi";
+  filename "${MINIONS_EXPORT_PREFIX}${MINION_NAME}/shim.efi";
 }
 EOF
+
+		btrfs property set "${subvol}" ro true
 
 		echo "DHCPD configuration created in '/etc/dhcpd.d/netboot-${MINION_NAME}.conf',"
 		echo "make sure to include it in the right place."
@@ -178,7 +190,7 @@ EOF
 		if [ -e "${root}/current-snapshot" ]; then
 			old_subvol="$(readlink "${root}/current-snapshot")"
 		else
-			old_subvol = ".snapshots/1/snapshot"
+			old_subvol=".snapshots/1/snapshot"
 		fi
 
 		# Create a new RW snapshot
@@ -196,7 +208,7 @@ EOF
 		snapshot_mount="$(prepare_chroot "${root}/${new_subvol}")"
 
 		ret=0
-		PS1='slave:\w # ' chroot "${snapshot_mount}" $@ || ret=$?
+		PS1="minion(${MINION_NAME}):\\w # " chroot "${snapshot_mount}" $@ || ret=$?
 
 		### TODO: How detect that this is necessary? Probably a custom update-bootloader integration
 
@@ -219,7 +231,7 @@ EOF
 			ln -sfT current-snapshot/usr/lib/grub2/i386-pc "${root}/i386-pc"
 			ln -sfT current-snapshot/usr/lib/grub2/x86_64-efi "${root}/x86_64-efi"
 			# Here we need a generated one
-			ln -sfT current-snapshot/boot/grub.pxe "${root}/grub.pxe"
+			ln -sfT current-snapshot/boot/grub2/i386-pc/grub.pxe "${root}/grub.pxe"
 		fi
 
 		if [ $ret != 0 ]; then
