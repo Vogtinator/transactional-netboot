@@ -49,15 +49,18 @@ Advanced configuration: /home on overlay
 ----------------------------------------
 
 1. Go into the minion chroot: `transactional-netboot tumbleweed`
-2. Create /etc/systemd/system/tmp-overlay@.service with this content:  
-`[Unit]`  
-`Description=Directories for overlay mounting of %I`  
-`Requires=tmp.mount`  
-`After=tmp.mount`  
-` `  
-`[Service]`  
-`Type=simple`  
-`ExecStart=/usr/bin/mkdir -p /tmp/%I-upper /tmp/%I-work`
+2. Create `/etc/systemd/system/tmp-overlay@.service` with this content:
+
+```
+[Unit]  
+Description=Directories for overlay mounting of %I
+Requires=tmp.mount
+After=tmp.mount
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/mkdir -p /tmp/%I-upper /tmp/%I-work
+```
 
 3. Append a mountpoint for `/home` to `/etc/fstab`:  
 `overlay /home overlay defaults,upperdir=/tmp/home-upper,workdir=/tmp/home-work,lowerdir=/home,x-systemd.requires=tmp-overlay@home.service 0 0`
