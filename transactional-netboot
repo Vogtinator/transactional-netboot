@@ -1,0 +1,241 @@
+#!/bin/bash
+#
+# transactional-netboot
+#
+# Copyright (C) 2018 SUSE LLC
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation in version 3.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+set -euo pipefail
+
+# Prepare a mountpoint of a snapshot to chroot into
+function prepare_chroot {
+	mountpoint="$(mktemp -d)" || return
+
+	if mount --bind --make-private "$1" "${mountpoint}" \
+		&& mount -t devtmpfs devtmpfs "${mountpoint}/dev" \
+		&& mount -t sysfs sysfs "${mountpoint}/sys" \
+		&& mount -t proc proc "${mountpoint}/proc" \
+		&& mount -t tmpfs tmpfs  "${mountpoint}/run" \
+		&& mount -t tmpfs tmpfs  "${mountpoint}/tmp" \
+		&& mount --bind "$1/../../../.snapshots" "${mountpoint}/.snapshots"; then
+		echo "${mountpoint}"
+		return 0
+	fi
+
+	return 1
+}
+
+# Cleanup a mountpoint prepared by prepare_chroot
+function cleanup_chroot {
+	umount $1/{tmp,run,proc,sys,dev,.snapshots,} 2>/dev/null || :
+	rmdir $1 || :
+}
+
+function print_help {
+	cat <<EOF
+Usage: transactional-netboot [--help] <minion name> [command] ...
+
+Available commands:
+	--init:
+		Initialize a new minion for installation.
+
+	--setup:
+		Setup a minion for booting and transactional-netboot use.
+		Call this after you installed a minion using --init.
+
+	--:
+		Pass the rest of the parameters to chroot.
+
+	<anything else not starting with ->:
+		Run in the minion's context.
+EOF
+}
+
+[ -r /etc/transactional-netboot.conf ] && . /etc/transactional-netboot.conf
+
+if [ -z "${MINIONS_PATH+x}" ]; then
+	echo "MINIONS_PATH not configured in /etc/transactional-netboot.conf" >&2
+	exit 1
+fi
+
+MINIONS_EXPORT_PREFIX="${MINIONS_NFS_PREFIX+/}"
+
+if [ "$#" -eq 0 -o "$1" = "--help" ]; then
+	print_help
+	exit 0
+fi
+
+MINION_NAME="$1"
+shift
+COMMAND="${1+}"
+shift
+
+case "$COMMAND" in
+	--init)
+		if [ -d "${MINIONS_PATH}/${MINION_NAME}" ]; then
+			echo "Minion already there. Please delete manually if you want to re-init." >&2
+			exit 1
+		fi
+
+		btrfs subvolume create "${MINIONS_PATH}/${MINION_NAME}"
+		btrfs subvolume create "${MINIONS_PATH}/${MINION_NAME}/.snapshots"
+		mkdir "${MINIONS_PATH}/${MINION_NAME}/@/.snapshots/1"
+		btrfs subvolume create "${MINIONS_PATH}/${MINION_NAME}/.snapshots/1/snapshot"
+		cat > "${MINIONS_PATH}/${MINION_NAME}/.snapshots/1/snapshot/info.xml" <<EOF
+<?xml version="1.0"?>
+<snapshot>
+  <type>single</type>
+  <num>1</num>
+  <date>$(date +"%F %T")</date>
+  <description>Initial installation</description>
+</snapshot>
+EOF
+
+		mkdir -p "${MINIONS_PATH}/.install/${MINION_NAME}"
+		mount --bind "${MINIONS_PATH}/${MINION_NAME}/.snapshots/1/snapshot" "${MINIONS_PATH}/.install/${MINION_NAME}"
+
+		echo "Now install into nfs at <ip>:${MINIONS_EXPORT_PREFIX}/.install/${MINION_NAME} and call"
+		echo "transactional-netboot --setup '${MINION_NAME}' afterwards."
+
+		exit 0
+	;;
+	--setup)
+		if [ ! -d "${MINIONS_PATH}/${MINION_NAME}" ]; then
+			echo "Minion does not exist." >&2
+			exit 1
+		fi
+
+		if ! umount "${MINIONS_PATH}/.install/${MINION_NAME}"; then
+			echo "Still busy, try again later."
+			exit 1
+		fi
+
+		rmdir "${MINIONS_PATH}/.install/${MINION_NAME}"
+		
+		subvol="${MINIONS_PATH}/${MINION_NAME}/.snapshots/1/snapshot"
+
+		snapshot_mount="$(prepare_chroot "${subvol}")" || exit 1
+
+		# Create a default snapper config
+		cp ${snapshot_mount}/etc/snapper/{config-templates/default,configs/root}
+		chroot "${snapshot_mount}" snapper --no-dbus set-config NUMBER_CLEANUP=no TIMELINE_CREATE=no BACKGROUND_COMPARISON=no
+
+		cleanup_chroot "${snapshot_mount}"
+
+		btrfs property set "${subvol}" ro true
+
+		cat >"${MINIONS_PATH}/${MINION_NAME}/grub.cfg" <<"EOF"
+# Get the path of the loaded image
+eval "set net_default_boot_file=\$net_${net_default_interface}_boot_file"
+regexp -s root_path (.+/)[^/]+ $net_default_boot_file
+# And export it, used as prefix for all loaded files
+export root_path
+
+source ${root_path}/snapshot.cfg
+set prefix=(tftp)${root_path}${snapshot_root}/boot/grub2
+source ${prefix}/grub.cfg
+EOF
+
+		cat >"/etc/dhcpd.d/netboot-${MINION_NAME}.conf" <<EOF
+filename "${MINION_EXPORT_PREFIX}/grub.pxe";
+if substring (option vendor-class-identifier, 15, 5) = "00007" {
+  filename "${MINIONS_EXPORT_PREFIX}/shim.efi";
+}
+EOF
+
+		echo "DHCPD configuration created in '/etc/dhcpd.d/netboot-${MINION_NAME}.conf',"
+		echo "make sure to include it in the right place."
+		echo
+		echo "Now run transactional-netboot '${MINION_NAME}' for initial configuration."
+		exit 0
+	;;
+	--)
+		COMMAND="${1+}"
+		shift
+		;&
+	*)
+		[ -z "$COMMAND" ] && COMMAND="/bin/bash"
+
+		if [ ! -d "${MINIONS_PATH}/${MINION_NAME}" ]; then
+			echo "Minion does not exist." >&2
+			exit 1
+		fi
+
+		root="${MINIONS_PATH}/${MINION_NAME}"
+
+		# What's the current snapshot?
+		if [ -e "${root}/current-snapshot" ]; then
+			old_subvol="$(readlink "${root}/current-snapshot")"
+		else
+			old_subvol = ".snapshots/1/snapshot"
+		fi
+
+		# Create a new RW snapshot
+		snapshot_mount="$(prepare_chroot "${root}/${old_subvol}")" || exit 1
+
+		new_snapshot_id="$(chroot "${snapshot_mount}" snapper --no-dbus create -t single -p)"
+		new_subvol=".snapshots/${new_snapshot_id}/snapshot"
+
+		cleanup_chroot "${snapshot_mount}"
+
+		# Make it read-writable
+		btrfs property set "${root}/${new_subvol}" ro false
+
+		# Chroot to it
+		snapshot_mount="$(prepare_chroot "${root}/${new_subvol}")"
+
+		ret=0
+		PS1='slave:\w # ' chroot "${snapshot_mount}" $@ || ret=$?
+
+		### TODO: How detect that this is necessary? Probably a custom update-bootloader integration
+
+		# update-bootloader can't do this, so do it ourselves (todo: theme?)
+		[ $ret -eq 0 ] && chroot "${snapshot_mount}" grub2-mknetdir --themes=openSUSE --net-directory / >/dev/null
+		ret=$?
+		# grub2-mknetdir sets a wrong prefix, so do it ourselves
+		[ $ret -eq 0 ] && chroot "${snapshot_mount}" grub2-mkimage -O i386-pc-pxe -o /boot/grub2/i386-pc/grub.pxe -p "(tftp)" pxe tftp
+		ret=$?
+		# Config file regeneration has to be disabled, so do it ourselves as well
+		[ $ret -eq 0 ] && chroot "${snapshot_mount}" grub2-mkconfig -o /boot/grub2/grub.cfg >/dev/null 2>&1
+		ret=$?
+
+		cleanup_chroot "${snapshot_mount}"
+
+		if [ $ret -eq 0 ]; then
+			# Use the binaries from /usr/lib64/efi to keep the signature
+			ln -sfT current-snapshot/usr/lib64/efi/grub.efi "${root}/grub.efi"
+			ln -sfT current-snapshot/usr/lib64/efi/shim.efi "${root}/shim.efi"
+			ln -sfT current-snapshot/usr/lib/grub2/i386-pc "${root}/i386-pc"
+			ln -sfT current-snapshot/usr/lib/grub2/x86_64-efi "${root}/x86_64-efi"
+			# Here we need a generated one
+			ln -sfT current-snapshot/boot/grub.pxe "${root}/grub.pxe"
+		fi
+
+		if [ $ret != 0 ]; then
+			echo "Operation failed - deleting snapshot"
+			btrfs subvolume delete "${root}/.snapshots/${new_snapshot_id}/snapshot"
+			rm -rf "${root}/.snapshots/${new_snapshot_id}"
+		else
+			# Make sure it's read-only
+			btrfs property set "${root}/${new_subvol}" ro true
+
+			echo "set snapshot_root=/${new_subvol}" > "${root}/snapshot.cfg"
+			ln -sfT "${new_subvol}" "${root}/current-snapshot"
+
+			echo "Active snapshot is now ${new_subvol}"
+		fi
+
+		exit $ret
+	;;
+esac
