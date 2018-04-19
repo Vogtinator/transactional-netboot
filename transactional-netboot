@@ -125,6 +125,7 @@ EOF
 		fi
 
 		if mountpoint -q "${MINIONS_PATH}/.install/${MINION_NAME}"; then
+			exportfs -u "${MINIONS_PATH}/.install/${MINION_NAME}" 2>&1 || :
 			if ! umount "${MINIONS_PATH}/.install/${MINION_NAME}"; then
 				echo "Still busy, try again later."
 				exit 1
