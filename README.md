@@ -42,10 +42,11 @@ Make sure that the DHCP server used for netbooting gives out IPs to the nodes.
 9. Call `transactional-netboot tumbleweed` to open a shell in a new snapshot. In this shell you need to perform the initial configuration, explained in the next steps.
 10. Edit /etc/sysconfig/bootloader, set `LOADER_TYPE="none"`.
 11. Edit /etc/default/grub, set  
-`GRUB_CMDLINE_LINUX_DEFAULT="rd.neednet=1 ip=dhcp root=nfs4::\${root_path}\${snapshot_root}"`
+`GRUB_CMDLINE_LINUX_DEFAULT="rd.neednet=1 ip=dhcp"`
 `GRUB_DISABLE_OS_PROBER="true"`  
 `SUSE_NFS_SNAPSHOT_BOOTING="true"`  
 `GRUB_DEVICE_BOOT="nfs"`  
+`GRUB_FS="nfs"`
 12. Write `use_fstab="yes"` into /etc/dracut.conf.d/42-nfsroot.conf
 13. Install read-only-root-fs-volatile, dracut and grub2 from obs://home:favogt:nfsroot
 14. Install kernel-default from obs://home:favogt:overlay/standard
