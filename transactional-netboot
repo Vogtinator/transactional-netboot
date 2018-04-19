@@ -70,7 +70,7 @@ if [ -z "${MINIONS_PATH+x}" ]; then
 	exit 1
 fi
 
-[ -z "${MINIONS_EXPORT_PREFIX+x}" ] && MINIONS_EXPORT_PREFIX="/"
+[ -z "${MINIONS_EXPORT_PREFIX+x}" ] && MINIONS_EXPORT_PREFIX=""
 
 if [ "$#" -eq 0 -o "${1-}" = "--help" ]; then
 	print_help
@@ -221,6 +221,8 @@ EOF
 		# Config file regeneration has to be disabled, so do it ourselves as well
 		[ $ret -eq 0 ] && chroot "${snapshot_mount}" grub2-mkconfig -o /boot/grub2/grub.cfg >/dev/null 2>&1
 		ret=$?
+		# tftp only allows world-readable files to be transmitted
+		chmod -R a+r "${snapshot_mount}/boot"
 
 		cleanup_chroot "${snapshot_mount}"
 

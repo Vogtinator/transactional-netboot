@@ -4,16 +4,24 @@ transactional-netboot
 Set up the server
 -----------------
 
-1. Have an installed openSUSE Leap 15.0 or TW
-2. Install tftp from obs://home:favogt:nfsroot. You also need dhcp-server, but it can run on a separate system.
-3. Create a directory containing all minion systems, for instance /srv/minion. The directory needs to be on btrfs, with CoW enabled, but not part of snapper's snapshots. Create a ".install" subdirectory.
-4. Edit /etc/sysconfig/tftp, set `TFTP_USER="root"` and `TFTP_DIRECTORY="/srv/minion"`.  
+1. Use any working Linux system with NFS and tftp servers. openSUSE Leap 15.0 and Tumbleweed are known to work.
+2. Create a directory containing all minion systems, for instance /srv/minion. The directory needs to be on btrfs, with CoW enabled, but not part of snapper's snapshots. Create a ".install" subdirectory.
+3. Edit /etc/sysconfig/tftp, set `TFTP_DIRECTORY="/srv/minion"`.  
   As long as the whole /srv/minion tree is accessible from NFS and tftp under the same path, you can choose to export a different path as well. This means you can also export parent directories or use bind mounts.
-5. Edit /etc/exports, export the directory as noted. Make sure that it is readable by all clients. Example:  
+4. Create `/etc/transactional-netboot.conf`:
+```
+# Absolute path to the directory containing the minion filesystem snapshots
+MINIONS_PATH=/srv/minion
+# If the MINIONS_PATH is not directly visible at tftp://localhost/ resp. localhost:/,
+# Set the common prefix here.
+MINIONS_EXPORT_PREFIX=
+```
+Adjust both values as necessary.
+4. Edit /etc/exports, export the directory as noted. Make sure that it is readable by all clients. Example:  
 `/srv/minion 192.168.42.0/24(ro,async,no_subtree_check,no_root_squash,fsid=0)`. The `async,fsid=0` parameters are not necessary.  
 Export the `.install` subdirectory as `rw,nohide,crossmnt`. Example:  
 `/srv/minion/.install 192.168.42.0/24(rw,async,no_subtree_check,no_root_squash,nohide,crossmnt)`
-6. Install transactional-netboot:  
+5. Install transactional-netboot:  
 `git clone https://gitlab.suse.de/favogt/transactional-nfs-tools`
 
 Set up a minion
