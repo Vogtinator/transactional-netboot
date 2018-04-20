@@ -48,11 +48,19 @@ Make sure that the DHCP server used for netbooting gives out IPs to the nodes.
 `GRUB_DEVICE_BOOT="nfs"`  
 `GRUB_FS="nfs"`
 12. Write `use_fstab="yes"` into /etc/dracut.conf.d/42-nfsroot.conf
-13. Install read-only-root-fs-volatile, dracut and grub2 from obs://home:favogt:nfsroot
-14. Install kernel-default from obs://home:favogt:overlay/standard
+13. Follow either the guide for minions with volatile or persistent storage
+14. Run `mkinitrd`
 15. Leave the minion chroot with `exit`
 
 Now you can boot the nodes using PXE.
+
+Minion with volatile storage
+----------------------------
+
+A minion set up this way stores all changes in tmpfs.
+
+1. Install read-only-root-fs-volatile, dracut and grub2 from obs://home:favogt:nfsroot
+2. Install kernel-default from obs://home:favogt:overlay/standard
 
 Advanced configuration: /home on overlay
 ----------------------------------------
@@ -61,7 +69,7 @@ Advanced configuration: /home on overlay
 2. Create `/etc/systemd/system/tmp-overlay@.service` with this content:
 
 ```
-[Unit]  
+[Unit]
 Description=Directories for overlay mounting of %I
 Requires=tmp.mount
 After=tmp.mount
@@ -77,3 +85,70 @@ ExecStart=/usr/bin/mkdir -p /tmp/%I-upper /tmp/%I-work
 
 You can use the same mechanism for e.g. `/root` by adding a line in `/etc/fstab`.
 
+Minion with persistent storage
+------------------------------
+
+A minion with persistent storage has /var mounted from a local device.
+
+1. Edit /etc/fstab, add entries for the minion's /var and /tmp:
+```
+/dev/vda1 /var ext4 defaults 0 0
+tmpfs /tmp tmpfs defaults,nosuid,nodev 0 0
+```
+2. Install transactional-netboot-persistent and read-only-root-fs
+3. Create /etc/transactional-netboot/create-varpart.sh (executable) which creates and copies over /var contents. Example:
+
+```
+#!/bin/bash
+
+set -euo pipefail
+
+PARTITION=/dev/vda1
+
+if [ -e $PARTITION ]; then
+        echo "Partition already there."
+        return 0
+fi
+
+DISK=/dev/vda
+
+cat <<EOF | fdisk $DISK
+g
+n
+1
+
+
+p
+w
+EOF
+
+partprobe $DISK
+mkfs.ext4 $PARTITION
+mount $PARTITION /mnt
+rsync -aAXH /var/ /mnt/
+sync
+umount /mnt
+```
+
+Minion with /home on a persistent overlay
+-----------------------------------------
+
+1. Go into the minion chroot: `transactional-netboot tumbleweed`
+2. Create `/etc/systemd/system/var-overlay@.service` with this content:
+
+```
+[Unit]
+Description=Directories for overlay mounting of %I
+Requires=var.mount
+After=var.mount
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/mkdir -p /var/lib/overlay/%I /var/lib/overlay/work-%I
+```
+
+3. Append a mountpoint for `/home` to `/etc/fstab`:  
+`overlay /home overlay defaults,upperdir=/var/lib/overlay/home,workdir=/var/lib/overlay/work-home,lowerdir=/home,x-systemd.requires=var-overlay@home.service 0 0`
+4. Exit the chroot: `exit`
+
+You can use the same mechanism for e.g. `/root` by adding a line in `/etc/fstab`.
